@@ -44,3 +44,18 @@ export async function getProducts(): Promise<Product[]> {
 
   return (data as DBProduct[]).map(toProduct);
 }
+
+export async function getProductById(id: string): Promise<Product | null> {
+  const { data, error } = await supabase
+    .from("products")
+    .select("*")
+    .eq("id", id)
+    .single();
+
+  if (error || !data) return null;
+  return toProduct(data as DBProduct);
+}
+
+export function generateSlug(product: Product): string {
+  return `${product.id}`;
+}
