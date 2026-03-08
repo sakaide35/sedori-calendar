@@ -49,10 +49,23 @@ export default function ProductFeed({ products }: ProductFeedProps) {
     ? products
     : products.filter((p) => p.category === selectedCategory);
 
-  // 日付ごとにグループ化
-  const grouped = filtered.reduce<Record<string, Product[]>>((acc, p) => {
+  // 日付ごとにグループ化（開始日と終了日のみ表示、期間中毎日は不要）
+  const grouped = filtered.reduce<Record<string, { product: Product; label: string }[]>>((acc, p) => {
+    // 開始日に表示
     if (!acc[p.eventDate]) acc[p.eventDate] = [];
-    acc[p.eventDate].push(p);
+    acc[p.eventDate].push({
+      product: p,
+      label: p.eventEndDate ? `${EVENT_TYPE_LABELS[p.eventType]}開始` : EVENT_TYPE_LABELS[p.eventType],
+    });
+
+    // 終了日がある場合、終了日にも表示
+    if (p.eventEndDate && p.eventEndDate !== p.eventDate) {
+      if (!acc[p.eventEndDate]) acc[p.eventEndDate] = [];
+      acc[p.eventEndDate].push({
+        product: p,
+        label: `${EVENT_TYPE_LABELS[p.eventType]}締切`,
+      });
+    }
     return acc;
   }, {});
 
@@ -121,10 +134,10 @@ export default function ProductFeed({ products }: ProductFeedProps) {
 
               {/* Product cards */}
               <div className="space-y-3">
-                {grouped[date].map((product) => (
+                {grouped[date].map(({ product: p, label }) => (
                   <Link
-                    key={product.id}
-                    href={`/products/${product.id}`}
+                    key={`${p.id}-${label}`}
+                    href={`/products/${p.id}`}
                     className={`block bg-white rounded-xl border border-zinc-200 p-4 hover:shadow-md transition ${
                       isPast(date) ? "opacity-60" : ""
                     }`}
@@ -133,30 +146,34 @@ export default function ProductFeed({ products }: ProductFeedProps) {
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1.5">
                           <span
-                            className={`inline-block px-2 py-0.5 rounded text-[11px] text-white font-medium ${CATEGORY_COLORS[product.category]}`}
+                            className={`inline-block px-2 py-0.5 rounded text-[11px] text-white font-medium ${CATEGORY_COLORS[p.category]}`}
                           >
-                            {CATEGORY_LABELS[product.category]}
+                            {CATEGORY_LABELS[p.category]}
                           </span>
-                          <span className="inline-block px-2 py-0.5 rounded text-[11px] bg-zinc-100 text-zinc-600 font-medium">
-                            {EVENT_TYPE_LABELS[product.eventType]}
+                          <span className={`inline-block px-2 py-0.5 rounded text-[11px] font-medium ${
+                            label.includes("締切")
+                              ? "bg-red-100 text-red-700"
+                              : "bg-zinc-100 text-zinc-600"
+                          }`}>
+                            {label}
                           </span>
-                          {product.note && (
+                          {p.note && (
                             <span className="inline-block px-2 py-0.5 rounded text-[11px] bg-amber-100 text-amber-700 font-medium">
                               注意
                             </span>
                           )}
                         </div>
                         <h3 className="font-bold text-zinc-900 text-base leading-snug">
-                          {product.name}
+                          {p.name}
                         </h3>
-                        {product.eventEndDate && (
+                        {p.eventEndDate && (
                           <p className="text-xs text-zinc-400 mt-1">
-                            〜 {formatDate(product.eventEndDate)}まで
+                            期間: {formatDate(p.eventDate)} 〜 {formatDate(p.eventEndDate)}
                           </p>
                         )}
-                        {product.source && (
+                        {p.source && (
                           <p className="text-xs text-zinc-400 mt-1">
-                            情報元: {product.source}
+                            情報元: {p.source}
                           </p>
                         )}
                       </div>
@@ -164,27 +181,27 @@ export default function ProductFeed({ products }: ProductFeedProps) {
                       {/* Price info */}
                       <div className="text-right shrink-0">
                         <div className="text-sm text-zinc-500">
-                          定価 <span className="font-medium text-zinc-800">{formatPrice(product.price)}</span>
+                          定価 <span className="font-medium text-zinc-800">{formatPrice(p.price)}</span>
                         </div>
-                        {product.marketPrice && (
+                        {p.marketPrice && (
                           <div className="text-sm text-red-600 font-bold">
-                            相場 {formatPrice(product.marketPrice)}
+                            相場 {formatPrice(p.marketPrice)}
                           </div>
                         )}
-                        {product.premiumRate && (
+                        {p.premiumRate && (
                           <div className={`text-lg font-black mt-1 ${
-                            product.premiumRate >= 3
+                            p.premiumRate >= 3
                               ? "text-red-600"
-                              : product.premiumRate >= 1.5
+                              : p.premiumRate >= 1.5
                                 ? "text-orange-500"
                                 : "text-green-600"
                           }`}>
-                            {product.premiumRate}倍
+                            {p.premiumRate}倍
                           </div>
                         )}
-                        {product.marketPrice && (
+                        {p.marketPrice && (
                           <div className="text-xs text-green-600 mt-0.5">
-                            +{formatPrice(product.marketPrice - product.price)}
+                            +{formatPrice(p.marketPrice - p.price)}
                           </div>
                         )}
                       </div>
