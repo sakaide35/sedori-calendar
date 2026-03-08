@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import * as cheerio from "cheerio";
+import { sendLineBroadcast, formatProductNotification } from "@/lib/line";
 
 function getSupabaseAdmin() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
@@ -235,6 +236,7 @@ export async function GET(request: NextRequest) {
 
   // DBに挿入（重複チェック: 同名+同日のものはスキップ）
   let inserted = 0;
+  const newProducts: ScrapedProduct[] = [];
   for (const product of results) {
     const { data: existing } = await db
       .from("products")
@@ -245,12 +247,21 @@ export async function GET(request: NextRequest) {
 
     if (!existing) {
       const { error } = await db.from("products").insert(product);
-      if (!error) inserted++;
+      if (!error) {
+        inserted++;
+        newProducts.push(product);
+      }
     }
   }
 
+  // 新規商品があればLINE通知
+  if (newProducts.length > 0) {
+    const messages = formatProductNotification(newProducts);
+    await sendLineBroadcast(messages);
+  }
+
   return NextResponse.json({
-    message: `Scraped ${results.length} products, inserted ${inserted} new`,
+    message: `Scraped ${results.length} products, inserted ${inserted} new, notified ${newProducts.length}`,
     sources: {
       tenbaiLabo: tenbaiLabo.length,
       tenbaiQuest: tenbaiQuest.length,
