@@ -158,14 +158,6 @@ export default async function ProductPage({ params }: Props) {
             </div>
           )}
 
-          {/* Source */}
-          {product.source && (
-            <div className="bg-white rounded-xl border border-zinc-200 p-5 mb-4">
-              <h2 className="text-sm font-bold text-zinc-500 mb-1">情報元</h2>
-              <p className="text-zinc-700">{product.source}</p>
-            </div>
-          )}
-
           {/* SEO structured data */}
           <script
             type="application/ld+json"

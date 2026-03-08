@@ -171,11 +171,6 @@ export default function ProductFeed({ products }: ProductFeedProps) {
                             期間: {formatDate(p.eventDate)} 〜 {formatDate(p.eventEndDate)}
                           </p>
                         )}
-                        {p.source && (
-                          <p className="text-xs text-zinc-400 mt-1">
-                            情報元: {p.source}
-                          </p>
-                        )}
                       </div>
 
                       {/* Price info */}
