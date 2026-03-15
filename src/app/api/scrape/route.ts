@@ -324,18 +324,21 @@ async function scrapeTenbaiQuest(): Promise<ScrapedProduct[]> {
 
     // トップページの記事リストからリンクを取得（複数セレクタ対応）
     const links: string[] = [];
+    // 全カテゴリの記事リンクを取得
+    const articlePaths = ["/resale/", "/sneakers/", "/figure/", "/clothes/", "/game/", "/tenbai/", "/sedori/", "/limited/"];
     $("a[href]").each((_, el) => {
-      const href = $(el).attr("href");
+      const href = $(el).attr("href") || "";
       if (
         href &&
-        (href.includes("/resale/") || href.includes("/tenbai/") || href.includes("/sedori/")) &&
+        articlePaths.some((p) => href.includes(p)) &&
+        !href.includes("/limited/paid-") && // 有料記事は除外
         !links.includes(href)
       ) {
         links.push(href);
       }
     });
 
-    // セレクタでヒットしない場合、記事っぽいリンクを広く取得
+    // 上記でヒットしない場合、記事っぽいリンクを広く取得
     if (links.length === 0) {
       $("a[href]").each((_, el) => {
         const href = $(el).attr("href") || "";
@@ -355,8 +358,8 @@ async function scrapeTenbaiQuest(): Promise<ScrapedProduct[]> {
 
     log.push(`tenbaiquest: ${links.length} article links found`);
 
-    // 各記事ページをフェッチ（最大8件に増加）
-    for (const link of links.slice(0, 8)) {
+    // 各記事ページをフェッチ（最大20件）
+    for (const link of links.slice(0, 20)) {
       try {
         const url = link.startsWith("http")
           ? link
