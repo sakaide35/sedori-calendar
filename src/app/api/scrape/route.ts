@@ -1,12 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import * as cheerio from "cheerio";
-import { sendLineBroadcast, formatProductNotification } from "@/lib/line";
 
 function getSupabaseAdmin() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
   const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
   return createClient(supabaseUrl, supabaseServiceKey);
+}
+
+interface ScrapedSalesChannel {
+  channel_type: "store" | "online" | "lottery";
+  name: string;
+  url?: string;
+  store_detail?: string;
 }
 
 interface ScrapedProduct {
@@ -20,6 +26,8 @@ interface ScrapedProduct {
   event_type: "release" | "lottery" | "restock";
   source: string;
   note?: string;
+  official_url?: string;
+  salesChannels?: ScrapedSalesChannel[];
 }
 
 // カテゴリ推定
@@ -45,23 +53,33 @@ function guessEventType(title: string): "release" | "lottery" | "restock" {
   return "release";
 }
 
-// タイトルから日付を抽出（例: 【2026/3/1〜抽選】or【2026年3月1日発売】）
-function extractDateFromTitle(title: string): string | null {
-  // パターン1: 2026/3/1 or 2026/03/01
-  const m1 = title.match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+// タイトルや本文から日付を抽出（複数パターン対応）
+function extractDateFromText(text: string): string | null {
+  // パターン1: 2026/3/1 or 2026/03/01 or 2026-03-01
+  const m1 = text.match(/(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
   if (m1) {
     return `${m1[1]}-${m1[2].padStart(2, "0")}-${m1[3].padStart(2, "0")}`;
   }
   // パターン2: 2026年3月1日
-  const m2 = title.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/);
+  const m2 = text.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/);
   if (m2) {
     return `${m2[1]}-${m2[2].padStart(2, "0")}-${m2[3].padStart(2, "0")}`;
   }
-  // パターン3: 3/1（年なし→今年と仮定）
-  const m3 = title.match(/(\d{1,2})月(\d{1,2})日/);
+  // パターン3: 3月1日（年なし→今年と仮定）
+  const m3 = text.match(/(\d{1,2})月(\d{1,2})日/);
   if (m3) {
     const year = new Date().getFullYear();
     return `${year}-${m3[1].padStart(2, "0")}-${m3[2].padStart(2, "0")}`;
+  }
+  // パターン4: 3/1（年なし→今年と仮定）
+  const m4 = text.match(/(\d{1,2})\/(\d{1,2})/);
+  if (m4) {
+    const month = parseInt(m4[1], 10);
+    const day = parseInt(m4[2], 10);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      const year = new Date().getFullYear();
+      return `${year}-${m4[1].padStart(2, "0")}-${m4[2].padStart(2, "0")}`;
+    }
   }
   return null;
 }
@@ -76,6 +94,12 @@ function extractPrice(html: string): number | null {
   // 「税込 396,000円」
   const m2 = text.match(/税込[）\)]?\s*([0-9,]+)\s*円/);
   if (m2) return parseInt(m2[1].replace(/,/g, ""), 10);
+  // 「価格：19,800円」
+  const m3 = text.match(/価格[：:]?\s*([0-9,]+)\s*円/);
+  if (m3) return parseInt(m3[1].replace(/,/g, ""), 10);
+  // 「¥19,800」
+  const m4 = text.match(/¥\s*([0-9,]+)/);
+  if (m4) return parseInt(m4[1].replace(/,/g, ""), 10);
   return null;
 }
 
@@ -95,6 +119,111 @@ function extractMarketPrice(html: string): number | null {
   return null;
 }
 
+// 本文から公式URL・抽選URLを抽出
+function extractOfficialUrl(html: string): string | null {
+  const $ = cheerio.load(html);
+  let officialUrl: string | null = null;
+
+  $("a").each((_, el) => {
+    if (officialUrl) return;
+    const href = $(el).attr("href") || "";
+    const linkText = $(el).text().trim().toLowerCase();
+    // 公式サイト、公式ページ、抽選ページ、販売ページ等のリンク
+    if (
+      (/公式|official/i.test(linkText) && href.startsWith("http")) ||
+      /抽選(ページ|応募|エントリー|受付)/i.test(linkText) ||
+      /販売ページ|購入ページ|shop.*page/i.test(linkText) ||
+      /snkrs\.com|nike\.com.*launch|adidas\.com.*yeezy/i.test(href)
+    ) {
+      officialUrl = href;
+    }
+  });
+
+  return officialUrl;
+}
+
+// 本文から販売場所・抽選情報を抽出
+function extractSalesChannels(html: string): ScrapedSalesChannel[] {
+  const $ = cheerio.load(html);
+  const text = $.text();
+  const channels: ScrapedSalesChannel[] = [];
+  const seen = new Set<string>();
+
+  // リンク付き販売先を抽出
+  $("a").each((_, el) => {
+    const href = $(el).attr("href") || "";
+    const linkText = $(el).text().trim();
+    if (!href || !linkText || href.startsWith("#")) return;
+
+    // SNKRS / スニーカーズ
+    if (/snkrs|nike\.com.*launch/i.test(href) || /snkrs|スニーカーズ/i.test(linkText)) {
+      const key = "lottery-SNKRS";
+      if (!seen.has(key)) {
+        seen.add(key);
+        channels.push({ channel_type: "lottery", name: "SNKRS", url: href });
+      }
+    }
+    // 抽選リンク
+    else if (/抽選|raffle|応募/i.test(linkText)) {
+      const name = linkText.replace(/[で|の]?抽選.*$/, "").replace(/応募.*$/, "").trim() || linkText;
+      const key = `lottery-${name}`;
+      if (!seen.has(key) && name.length < 50) {
+        seen.add(key);
+        channels.push({ channel_type: "lottery", name, url: href });
+      }
+    }
+    // オンラインストアリンク
+    else if (/購入|販売|shop|store|通販|オンライン/i.test(linkText) && href.startsWith("http")) {
+      const name = linkText.replace(/(で|の)?(購入|販売|通販|オンライン).*$/, "").trim() || linkText;
+      const key = `online-${name}`;
+      if (!seen.has(key) && name.length < 50) {
+        seen.add(key);
+        channels.push({ channel_type: "online", name, url: href });
+      }
+    }
+  });
+
+  // テキストから販売店を抽出
+  const storePatterns = [
+    { pattern: /(?:atmos|アトモス)/i, name: "atmos" },
+    { pattern: /(?:UNDEFEATED|アンディフィーテッド)/i, name: "UNDEFEATED" },
+    { pattern: /(?:ABC-?MART|ABCマート)/i, name: "ABC-MART" },
+    { pattern: /(?:UNITED ARROWS|ユナイテッドアローズ)/i, name: "UNITED ARROWS" },
+    { pattern: /(?:BEAMS|ビームス)/i, name: "BEAMS" },
+    { pattern: /(?:DOVER STREET MARKET|DSM)/i, name: "DOVER STREET MARKET" },
+    { pattern: /(?:Nike\s*(?:直営|公式|ストア|店舗))/i, name: "Nike" },
+    { pattern: /(?:adidas\s*(?:直営|公式|ストア|店舗))/i, name: "adidas" },
+    { pattern: /(?:Supreme\s*(?:店舗|オンライン|公式))/i, name: "Supreme" },
+    { pattern: /(?:SNKRDUNK|スニダン)/i, name: "SNKRDUNK" },
+    { pattern: /(?:StockX)/i, name: "StockX" },
+    { pattern: /(?:ポケモンセンター)/i, name: "ポケモンセンター" },
+    { pattern: /(?:ポケモンストア)/i, name: "ポケモンストア" },
+    { pattern: /(?:Amazon|アマゾン)/i, name: "Amazon" },
+    { pattern: /(?:楽天)/i, name: "楽天" },
+  ];
+
+  for (const { pattern, name } of storePatterns) {
+    if (pattern.test(text)) {
+      const isOnline = new RegExp(`${name}.*(?:オンライン|通販|公式サイト|EC)`, "i").test(text);
+      const isStore = new RegExp(`${name}.*(?:店頭|店舗|直営)`, "i").test(text);
+      if (isOnline && !seen.has(`online-${name}`)) {
+        seen.add(`online-${name}`);
+        channels.push({ channel_type: "online", name });
+      }
+      if (isStore && !seen.has(`store-${name}`)) {
+        seen.add(`store-${name}`);
+        channels.push({ channel_type: "store", name });
+      }
+      if (!isOnline && !isStore && !seen.has(`online-${name}`) && !seen.has(`store-${name}`)) {
+        seen.add(`online-${name}`);
+        channels.push({ channel_type: "online", name });
+      }
+    }
+  }
+
+  return channels;
+}
+
 // 商品名をタイトルからクリーニング
 function extractProductName(title: string): string {
   // 【...】を除去
@@ -103,73 +232,131 @@ function extractProductName(title: string): string {
 
 async function scrapeTenbaiLaboRSS(): Promise<ScrapedProduct[]> {
   const products: ScrapedProduct[] = [];
+  const log: string[] = [];
   try {
     const res = await fetch("https://tenbailabo.com/feed", {
       headers: { "User-Agent": "SedoriCalendar/1.0" },
     });
+    if (!res.ok) {
+      log.push(`tenbailabo RSS: HTTP ${res.status}`);
+      console.error("[scrape] tenbailabo RSS HTTP error:", res.status);
+      return products;
+    }
     const xml = await res.text();
     const $ = cheerio.load(xml, { xml: true });
 
-    $("item").each((_, el) => {
+    const items = $("item");
+    log.push(`tenbailabo: ${items.length} items found`);
+
+    items.each((_, el) => {
       const title = $(el).find("title").text();
       const content = $(el).find("content\\:encoded").text();
+      const description = $(el).find("description").text();
       const categories = $(el)
         .find("category")
         .map((_, c) => $(c).text())
         .get();
 
-      const eventDate = extractDateFromTitle(title);
-      if (!eventDate) return; // 日付が取れない記事はスキップ
+      // タイトルから日付を抽出、なければ本文から
+      let eventDate = extractDateFromText(title);
+      if (!eventDate && content) {
+        eventDate = extractDateFromText(cheerio.load(content).text());
+      }
+      if (!eventDate && description) {
+        eventDate = extractDateFromText(description);
+      }
+      if (!eventDate) {
+        log.push(`  skip(no date): ${title.substring(0, 50)}`);
+        return;
+      }
 
       const name = extractProductName(title);
       if (!name) return;
 
-      const price = extractPrice(content);
-      if (!price) return; // 定価が不明な記事はスキップ
+      const bodyHtml = content || description || "";
+      const price = extractPrice(bodyHtml);
+      // 定価がなくてもスキップしない（0円として登録、後で更新可能）
 
-      const marketPrice = extractMarketPrice(content);
+      const marketPrice = extractMarketPrice(bodyHtml);
+      const actualPrice = price ?? 0;
       const premiumRate =
-        marketPrice && price
-          ? Math.round((marketPrice / price) * 100) / 100
+        marketPrice && actualPrice > 0
+          ? Math.round((marketPrice / actualPrice) * 100) / 100
           : undefined;
+
+      const salesChannels = extractSalesChannels(bodyHtml);
+      const officialUrl = extractOfficialUrl(bodyHtml);
 
       products.push({
         name,
         category: guessCategory(title, categories),
-        price,
+        price: actualPrice,
         market_price: marketPrice ?? undefined,
         premium_rate: premiumRate,
         event_date: eventDate,
         event_type: guessEventType(title),
         source: "転売博士",
+        official_url: officialUrl ?? undefined,
+        salesChannels: salesChannels.length > 0 ? salesChannels : undefined,
       });
     });
   } catch (e) {
     console.error("[scrape] tenbailabo RSS error:", e);
   }
+  console.log("[scrape] tenbailabo:", log.join(", "));
   return products;
 }
 
 async function scrapeTenbaiQuest(): Promise<ScrapedProduct[]> {
   const products: ScrapedProduct[] = [];
+  const log: string[] = [];
   try {
     const res = await fetch("https://tenbaiquest.com/", {
       headers: { "User-Agent": "SedoriCalendar/1.0" },
     });
+    if (!res.ok) {
+      log.push(`tenbaiquest: HTTP ${res.status}`);
+      console.error("[scrape] tenbaiquest HTTP error:", res.status);
+      return products;
+    }
     const html = await res.text();
     const $ = cheerio.load(html);
 
-    // トップページの記事リストからリンクを取得
+    // トップページの記事リストからリンクを取得（複数セレクタ対応）
     const links: string[] = [];
-    $(".post a, .posts a, article a").each((_, el) => {
+    $("a[href]").each((_, el) => {
       const href = $(el).attr("href");
-      if (href && href.includes("/resale/") && !links.includes(href)) {
+      if (
+        href &&
+        (href.includes("/resale/") || href.includes("/tenbai/") || href.includes("/sedori/")) &&
+        !links.includes(href)
+      ) {
         links.push(href);
       }
     });
 
-    // 各記事ページをフェッチ（最大5件、負荷軽減）
-    for (const link of links.slice(0, 5)) {
+    // セレクタでヒットしない場合、記事っぽいリンクを広く取得
+    if (links.length === 0) {
+      $("a[href]").each((_, el) => {
+        const href = $(el).attr("href") || "";
+        if (
+          href.startsWith("https://tenbaiquest.com/") &&
+          !href.endsWith("/") &&
+          href !== "https://tenbaiquest.com" &&
+          !href.includes("/category/") &&
+          !href.includes("/tag/") &&
+          !href.includes("/page/") &&
+          !links.includes(href)
+        ) {
+          links.push(href);
+        }
+      });
+    }
+
+    log.push(`tenbaiquest: ${links.length} article links found`);
+
+    // 各記事ページをフェッチ（最大8件に増加）
+    for (const link of links.slice(0, 8)) {
       try {
         const url = link.startsWith("http")
           ? link
@@ -177,35 +364,48 @@ async function scrapeTenbaiQuest(): Promise<ScrapedProduct[]> {
         const pageRes = await fetch(url, {
           headers: { "User-Agent": "SedoriCalendar/1.0" },
         });
+        if (!pageRes.ok) continue;
         const pageHtml = await pageRes.text();
         const page$ = cheerio.load(pageHtml);
 
         const title = page$("h1").first().text().trim();
         if (!title) continue;
 
-        const eventDate = extractDateFromTitle(title);
-        if (!eventDate) continue;
+        // タイトルから日付、なければ本文から
+        const bodyHtml = page$(".post_content, .entry-content, article, .main-content, main").html() || "";
+        let eventDate = extractDateFromText(title);
+        if (!eventDate) {
+          eventDate = extractDateFromText(page$(bodyHtml).text() || page$.text());
+        }
+        if (!eventDate) {
+          log.push(`  skip(no date): ${title.substring(0, 50)}`);
+          continue;
+        }
 
-        const bodyHtml = page$(".post_content, .entry-content, article").html() || "";
         const price = extractPrice(bodyHtml);
-        if (!price) continue;
+        const actualPrice = price ?? 0;
 
         const marketPrice = extractMarketPrice(bodyHtml);
         const premiumRate =
-          marketPrice && price
-            ? Math.round((marketPrice / price) * 100) / 100
+          marketPrice && actualPrice > 0
+            ? Math.round((marketPrice / actualPrice) * 100) / 100
             : undefined;
 
         const name = extractProductName(title);
+        const salesChannels = extractSalesChannels(bodyHtml);
+        const officialUrl = extractOfficialUrl(bodyHtml);
+
         products.push({
           name,
           category: guessCategory(title, []),
-          price,
+          price: actualPrice,
           market_price: marketPrice ?? undefined,
           premium_rate: premiumRate,
           event_date: eventDate,
           event_type: guessEventType(title),
           source: "転売クエスト",
+          official_url: officialUrl ?? undefined,
+          salesChannels: salesChannels.length > 0 ? salesChannels : undefined,
         });
       } catch {
         continue;
@@ -214,7 +414,185 @@ async function scrapeTenbaiQuest(): Promise<ScrapedProduct[]> {
   } catch (e) {
     console.error("[scrape] tenbaiquest error:", e);
   }
+  console.log("[scrape] tenbaiquest:", log.join(", "));
   return products;
+}
+
+// ポケカちゃん (@pokecachan) のXポストをRSSHub経由でスクレイプ
+async function scrapePokecachan(): Promise<ScrapedProduct[]> {
+  const products: ScrapedProduct[] = [];
+  const log: string[] = [];
+
+  // 複数のRSSHub/Nitterインスタンスを試行
+  const rssUrls = [
+    "https://rsshub.app/twitter/user/pokecachan",
+    "https://rss.app/feeds/v1.1/twitter/pokecachan.xml",
+  ];
+
+  let xml = "";
+  let fetched = false;
+
+  for (const rssUrl of rssUrls) {
+    try {
+      const res = await fetch(rssUrl, {
+        headers: { "User-Agent": "SedoriCalendar/1.0" },
+        signal: AbortSignal.timeout(10000),
+      });
+      if (res.ok) {
+        xml = await res.text();
+        fetched = true;
+        log.push(`pokecachan: fetched via ${new URL(rssUrl).hostname}`);
+        break;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  if (!fetched || !xml) {
+    // RSSが使えない場合、Nitterインスタンスを試行
+    const nitterUrls = [
+      "https://nitter.net/pokecachan/rss",
+      "https://nitter.privacydev.net/pokecachan/rss",
+    ];
+    for (const nUrl of nitterUrls) {
+      try {
+        const res = await fetch(nUrl, {
+          headers: { "User-Agent": "SedoriCalendar/1.0" },
+          signal: AbortSignal.timeout(10000),
+        });
+        if (res.ok) {
+          xml = await res.text();
+          fetched = true;
+          log.push(`pokecachan: fetched via nitter`);
+          break;
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  if (!fetched || !xml) {
+    log.push("pokecachan: all RSS sources failed");
+    console.error("[scrape] pokecachan: could not fetch RSS from any source");
+    console.log("[scrape] pokecachan:", log.join(", "));
+    return products;
+  }
+
+  try {
+    const $ = cheerio.load(xml, { xml: true });
+    const items = $("item");
+    log.push(`${items.length} items found`);
+
+    items.each((_, el) => {
+      const title = $(el).find("title").text();
+      const description = $(el).find("description").text();
+      const content = $(el).find("content\\:encoded").text();
+      const fullText = title + " " + description + " " + content;
+
+      // 日付を抽出
+      const eventDate = extractDateFromText(fullText);
+      if (!eventDate) return;
+
+      // ポケカ関連かチェック
+      const isRelevant = /ポケカ|ポケモン|トレカ|発売|抽選|再販|プレ値|相場/.test(fullText);
+      if (!isRelevant) return;
+
+      // 商品名を抽出
+      let name = extractProductName(title);
+      if (!name || name.length < 3) {
+        // タイトルが短い場合、descriptionから抽出を試みる
+        const descText = cheerio.load(description).text();
+        name = descText.substring(0, 100).split(/[。\n]/)[0].trim();
+      }
+      if (!name || name.length < 3) return;
+
+      const bodyHtml = description + " " + content;
+      const price = extractPrice(`<div>${bodyHtml}</div>`);
+      const marketPrice = extractMarketPrice(`<div>${bodyHtml}</div>`);
+      const actualPrice = price ?? 0;
+      const premiumRate =
+        marketPrice && actualPrice > 0
+          ? Math.round((marketPrice / actualPrice) * 100) / 100
+          : undefined;
+
+      // 公式URLを抽出
+      const officialUrl = extractOfficialUrl(`<div>${bodyHtml}</div>`);
+
+      products.push({
+        name,
+        category: "card", // ポケカちゃんは基本トレカ
+        price: actualPrice,
+        market_price: marketPrice ?? undefined,
+        premium_rate: premiumRate,
+        event_date: eventDate,
+        event_type: guessEventType(fullText),
+        source: "ポケカちゃん",
+        official_url: officialUrl ?? undefined,
+      });
+    });
+  } catch (e) {
+    console.error("[scrape] pokecachan parse error:", e);
+  }
+
+  console.log("[scrape] pokecachan:", log.join(", "));
+  return products;
+}
+
+// スニダンから最安値を取得
+async function scrapeSnkrdunkPrice(url: string): Promise<number | null> {
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      },
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+    const $ = cheerio.load(html);
+
+    // スニダンの最安値表示を取得（複数パターン対応）
+    const text = $.text();
+    // 「¥12,345」形式
+    const m1 = text.match(/¥([0-9,]+)/);
+    if (m1) return parseInt(m1[1].replace(/,/g, ""), 10);
+    // 「12,345円」形式
+    const m2 = text.match(/([0-9,]{4,})\s*円/);
+    if (m2) return parseInt(m2[1].replace(/,/g, ""), 10);
+
+    return null;
+  } catch (e) {
+    console.error(`[scrape] snkrdunk error for ${url}:`, e);
+    return null;
+  }
+}
+
+// スニダンURLが登録済みの商品の相場を更新
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function updateSnkrdunkPrices(db: any): Promise<number> {
+  const { data: products } = await db
+    .from("products")
+    .select("id, name, price, snkrdunk_url")
+    .not("snkrdunk_url", "is", null) as { data: { id: string; name: string; price: number; snkrdunk_url: string }[] | null };
+
+  if (!products || products.length === 0) return 0;
+
+  let updated = 0;
+  for (const p of products) {
+    const marketPrice = await scrapeSnkrdunkPrice(p.snkrdunk_url);
+    if (marketPrice && marketPrice > 0) {
+      const premiumRate = Math.round((marketPrice / p.price) * 100) / 100;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { error } = await (db as any)
+        .from("products")
+        .update({ market_price: marketPrice, premium_rate: premiumRate })
+        .eq("id", p.id);
+      if (!error) updated++;
+    }
+  }
+  return updated;
 }
 
 export async function GET(request: NextRequest) {
@@ -227,16 +605,17 @@ export async function GET(request: NextRequest) {
 
   const results: ScrapedProduct[] = [];
 
-  const [tenbaiLabo, tenbaiQuest] = await Promise.all([
+  const [tenbaiLabo, tenbaiQuest, pokecachan] = await Promise.all([
     scrapeTenbaiLaboRSS(),
     scrapeTenbaiQuest(),
+    scrapePokecachan(),
   ]);
 
-  results.push(...tenbaiLabo, ...tenbaiQuest);
+  results.push(...tenbaiLabo, ...tenbaiQuest, ...pokecachan);
 
   // DBに挿入（重複チェック: 同名+同日のものはスキップ）
   let inserted = 0;
-  const newProducts: ScrapedProduct[] = [];
+  let skipped = 0;
   for (const product of results) {
     const { data: existing } = await db
       .from("products")
@@ -246,26 +625,46 @@ export async function GET(request: NextRequest) {
       .maybeSingle();
 
     if (!existing) {
-      const { error } = await db.from("products").insert(product);
-      if (!error) {
+      const { salesChannels, ...productData } = product;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { data: insertedRow, error } = await (db as any)
+        .from("products")
+        .insert(productData)
+        .select("id")
+        .single();
+      if (!error && insertedRow) {
         inserted++;
-        newProducts.push(product);
+        // 販売場所を挿入
+        if (salesChannels && salesChannels.length > 0) {
+          const channelRows = salesChannels.map((ch) => ({
+            product_id: insertedRow.id,
+            channel_type: ch.channel_type,
+            name: ch.name,
+            url: ch.url ?? null,
+            store_detail: ch.store_detail ?? null,
+          }));
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          await (db as any).from("sales_channels").insert(channelRows);
+        }
+      } else if (error) {
+        console.error("[scrape] insert error:", error.message, "product:", product.name);
       }
+    } else {
+      skipped++;
     }
   }
 
-  // 新規商品があればLINE通知
-  if (newProducts.length > 0) {
-    const messages = formatProductNotification(newProducts);
-    await sendLineBroadcast(messages);
-  }
+  // スニダンURLが登録済みの商品の相場を更新
+  const snkrdunkUpdated = await updateSnkrdunkPrices(db);
 
   return NextResponse.json({
-    message: `Scraped ${results.length} products, inserted ${inserted} new, notified ${newProducts.length}`,
+    message: `Scraped ${results.length} products, inserted ${inserted} new, skipped ${skipped} duplicates, snkrdunk updated ${snkrdunkUpdated}`,
     sources: {
       tenbaiLabo: tenbaiLabo.length,
       tenbaiQuest: tenbaiQuest.length,
+      pokecachan: pokecachan.length,
     },
+    snkrdunkUpdated,
     timestamp: new Date().toISOString(),
   });
 }

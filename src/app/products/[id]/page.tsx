@@ -23,7 +23,8 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   if (!product) return { title: "商品が見つかりません" };
 
   const title = `${product.name} ${EVENT_TYPE_LABELS[product.eventType]}情報 | せどりカレンダー`;
-  const description = `${product.name}の${EVENT_TYPE_LABELS[product.eventType]}情報。定価${product.price.toLocaleString()}円${product.marketPrice ? `、市場相場${product.marketPrice.toLocaleString()}円（${product.premiumRate}倍）` : ""}。${product.eventDate}${product.eventEndDate ? `〜${product.eventEndDate}` : ""}。`;
+  const hasMarket = product.marketPrice && (product.snkrdunkUrl || product.eventType === "restock");
+  const description = `${product.name}の${EVENT_TYPE_LABELS[product.eventType]}情報。定価${product.price.toLocaleString()}円${hasMarket ? `、市場相場${product.marketPrice!.toLocaleString()}円` : ""}。${product.eventDate}${product.eventEndDate ? `〜${product.eventEndDate}` : ""}。`;
 
   return {
     title,
@@ -55,9 +56,8 @@ export default async function ProductPage({ params }: Props) {
   const product = await getProductById(id);
   if (!product) notFound();
 
-  const profit = product.marketPrice
-    ? product.marketPrice - product.price
-    : null;
+  const showMarket = product.marketPrice && (product.snkrdunkUrl || product.eventType === "restock");
+  const profit = showMarket ? product.marketPrice! - product.price : null;
 
   return (
     <div className="min-h-screen bg-zinc-50">
@@ -116,24 +116,24 @@ export default async function ProductPage({ params }: Props) {
                   {formatPrice(product.price)}
                 </p>
               </div>
-              {product.marketPrice && (
+              {showMarket && (
                 <div>
                   <p className="text-xs text-zinc-400">市場相場</p>
                   <p className="text-xl font-bold text-red-600">
-                    {formatPrice(product.marketPrice)}
+                    {formatPrice(product.marketPrice!)}
                   </p>
                 </div>
               )}
             </div>
 
-            {product.premiumRate && profit !== null && (
+            {showMarket && profit !== null && (
               <div className="mt-4 pt-4 border-t border-zinc-100 flex items-center justify-between">
                 <div>
                   <p className="text-xs text-zinc-400">プレミア率</p>
                   <p className={`text-3xl font-black ${
-                    product.premiumRate >= 3
+                    (product.premiumRate ?? 0) >= 3
                       ? "text-red-600"
-                      : product.premiumRate >= 1.5
+                      : (product.premiumRate ?? 0) >= 1.5
                         ? "text-orange-500"
                         : "text-green-600"
                   }`}>
@@ -149,6 +149,75 @@ export default async function ProductPage({ params }: Props) {
               </div>
             )}
           </div>
+
+          {/* Official URL */}
+          {product.officialUrl && (
+            <div className="bg-blue-50 border border-blue-200 rounded-xl p-5 mb-4">
+              <h2 className="text-sm font-bold text-blue-800 mb-2">公式ページ</h2>
+              <a
+                href={product.officialUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-600 hover:text-blue-800 underline font-medium break-all"
+              >
+                {product.officialUrl}
+              </a>
+            </div>
+          )}
+
+          {/* Sales channels */}
+          {product.salesChannels && product.salesChannels.length > 0 && (
+            <div className="bg-white rounded-xl border border-zinc-200 p-5 mb-4">
+              <h2 className="text-sm font-bold text-zinc-500 mb-3">販売場所</h2>
+              <div className="space-y-2">
+                {(() => {
+                  const byName: Record<string, { types: Set<string>; url?: string; storeDetail?: string }> = {};
+                  const lotteries: { name: string; url?: string }[] = [];
+                  for (const ch of product.salesChannels) {
+                    if (ch.channelType === "lottery") {
+                      lotteries.push({ name: ch.name, url: ch.url });
+                    } else {
+                      if (!byName[ch.name]) byName[ch.name] = { types: new Set() };
+                      byName[ch.name].types.add(ch.channelType);
+                      if (ch.url) byName[ch.name].url = ch.url;
+                      if (ch.storeDetail) byName[ch.name].storeDetail = ch.storeDetail;
+                    }
+                  }
+                  const items: React.ReactElement[] = [];
+                  for (const [name, info] of Object.entries(byName)) {
+                    const methods: string[] = [];
+                    if (info.types.has("store")) methods.push(info.storeDetail ? `店頭（${info.storeDetail}）` : "店頭");
+                    if (info.types.has("online")) methods.push("オンライン");
+                    items.push(
+                      <div key={name} className="flex items-center gap-2">
+                        {info.url ? (
+                          <a href={info.url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
+                            {name} {methods.join("・")}
+                          </a>
+                        ) : (
+                          <span className="text-zinc-700">{name} {methods.join("・")}</span>
+                        )}
+                      </div>
+                    );
+                  }
+                  for (const lot of lotteries) {
+                    items.push(
+                      <div key={`lottery-${lot.name}`} className="flex items-center gap-2">
+                        {lot.url ? (
+                          <a href={lot.url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
+                            抽選 {lot.name}
+                          </a>
+                        ) : (
+                          <span className="text-zinc-700">抽選 {lot.name}</span>
+                        )}
+                      </div>
+                    );
+                  }
+                  return items;
+                })()}
+              </div>
+            </div>
+          )}
 
           {/* Note */}
           {product.note && (

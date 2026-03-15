@@ -21,6 +21,19 @@ export interface Product {
   eventType: "release" | "lottery" | "restock"; // 発売 / 抽選 / 再販
   source?: string; // 情報ソース
   note?: string; // 備考（転売禁止誓約等）
+  snkrdunkUrl?: string; // スニダン商品ページURL
+  officialUrl?: string; // 公式販売/抽選ページURL
+  salesChannels?: SalesChannel[]; // 販売場所
+}
+
+export type ChannelType = "store" | "online" | "lottery";
+
+export interface SalesChannel {
+  id: string;
+  channelType: ChannelType;
+  name: string;
+  url?: string;
+  storeDetail?: string;
 }
 
 export const CATEGORY_LABELS: Record<Category, string> = {
