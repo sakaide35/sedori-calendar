@@ -13,6 +13,7 @@ interface DBProduct {
   event_type: string;
   source: string | null;
   note: string | null;
+  estimated_resale_price: number | null;
   snkrdunk_url: string | null;
   official_url: string | null;
 }
@@ -49,6 +50,7 @@ function toProduct(row: DBProduct, channels?: DBSalesChannel[]): Product {
     eventType: row.event_type as Product["eventType"],
     source: row.source ?? undefined,
     note: row.note ?? undefined,
+    estimatedResalePrice: row.estimated_resale_price ?? undefined,
     snkrdunkUrl: row.snkrdunk_url ?? undefined,
     officialUrl: row.official_url ?? undefined,
     salesChannels: channels?.map(toSalesChannel),

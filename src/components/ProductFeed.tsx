@@ -348,6 +348,11 @@ export default function ProductFeed({ products }: ProductFeedProps) {
                         <div className="text-sm text-zinc-500">
                           定価 <span className="font-medium text-zinc-800">{formatPrice(p.price)}</span>
                         </div>
+                        {p.estimatedResalePrice && (
+                          <div className="text-sm text-red-600 font-bold">
+                            プレ値予想 {formatPrice(p.estimatedResalePrice)}
+                          </div>
+                        )}
                         {p.marketPrice && (p.snkrdunkUrl || p.eventType === "restock") && (
                           <>
                             <div className="text-sm text-red-600 font-bold">

@@ -116,6 +116,14 @@ export default async function ProductPage({ params }: Props) {
                   {formatPrice(product.price)}
                 </p>
               </div>
+              {product.estimatedResalePrice && (
+                <div>
+                  <p className="text-xs text-zinc-400">プレ値予想</p>
+                  <p className="text-xl font-bold text-red-600">
+                    {formatPrice(product.estimatedResalePrice)}
+                  </p>
+                </div>
+              )}
               {showMarket && (
                 <div>
                   <p className="text-xs text-zinc-400">市場相場</p>

@@ -21,6 +21,7 @@ export interface Product {
   eventType: "release" | "lottery" | "restock"; // 発売 / 抽選 / 再販
   source?: string; // 情報ソース
   note?: string; // 備考（転売禁止誓約等）
+  estimatedResalePrice?: number; // プレ値予想（転売博士情報、円）
   snkrdunkUrl?: string; // スニダン商品ページURL
   officialUrl?: string; // 公式販売/抽選ページURL
   salesChannels?: SalesChannel[]; // 販売場所
