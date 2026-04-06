@@ -230,6 +230,27 @@ function extractProductName(title: string): string {
   return title.replace(/【[^】]*】/g, "").trim();
 }
 
+// ツイート本文から商品名を抽出
+function extractProductNameFromTweet(text: string): string | null {
+  // 【商品名】形式（転売博士など）
+  const bracket = text.match(/【([^】]+)】/);
+  if (bracket && bracket[1].length >= 3) return bracket[1].trim();
+
+  // 「商品名」形式（ポケカちゃんなど）
+  const paren = text.match(/「([^」]+)」/);
+  if (paren && paren[1].length >= 3) return paren[1].trim();
+
+  // 先頭行から取得（URLやハッシュタグを除去）
+  const firstLine = text.split(/\n/)[0]
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/#\S+/g, "")
+    .replace(/[🚨💡⚠️🔥🚀⭕️✅❗️📢🎁]/gu, "")
+    .trim();
+  if (firstLine.length >= 3 && firstLine.length <= 100) return firstLine;
+
+  return null;
+}
+
 async function scrapeTenbaiLaboRSS(): Promise<ScrapedProduct[]> {
   const products: ScrapedProduct[] = [];
   const log: string[] = [];
@@ -477,9 +498,8 @@ async function scrapePokecachan(): Promise<ScrapedProduct[]> {
     const isRelevant = /ポケカ|ポケモン|トレカ|発売|抽選|再販|プレ値|相場/.test(text);
     if (!isRelevant) continue;
 
-    let name = text.substring(0, 100).split(/[。\n]/)[0].trim();
-    name = extractProductName(name);
-    if (!name || name.length < 3) continue;
+    const name = extractProductNameFromTweet(text);
+    if (!name) continue;
 
     const price = extractPrice(`<div>${text}</div>`);
     const marketPrice = extractMarketPrice(`<div>${text}</div>`);
@@ -529,9 +549,8 @@ async function scrapeTenbaiHakase(): Promise<ScrapedProduct[]> {
     const isRelevant = /発売|抽選|再販|プレ値|相場|転売|せどり|限定|値上|高騰/.test(text);
     if (!isRelevant) continue;
 
-    let name = text.substring(0, 100).split(/[。\n]/)[0].trim();
-    name = extractProductName(name);
-    if (!name || name.length < 3) continue;
+    const name = extractProductNameFromTweet(text);
+    if (!name) continue;
 
     const price = extractPrice(`<div>${text}</div>`);
     const marketPrice = extractMarketPrice(`<div>${text}</div>`);
