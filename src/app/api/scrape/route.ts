@@ -421,125 +421,139 @@ async function scrapeTenbaiQuest(): Promise<ScrapedProduct[]> {
   return products;
 }
 
-// ポケカちゃん (@pokecachan) のXポストをRSSHub経由でスクレイプ
+// Twitter API v2 でユーザーのツイートを取得
+interface Tweet {
+  id: string;
+  text: string;
+  created_at?: string;
+}
+
+async function fetchTweetsFromX(username: string): Promise<{ tweets: Tweet[]; error?: string }> {
+  const bearerToken = process.env.TWITTER_BEARER_TOKEN;
+  if (!bearerToken) {
+    return { tweets: [], error: "TWITTER_BEARER_TOKEN not set" };
+  }
+
+  try {
+    const searchUrl = `https://api.x.com/2/tweets/search/recent?query=from:${username}&max_results=20&tweet.fields=created_at,text`;
+    const res = await fetch(searchUrl, {
+      headers: { Authorization: `Bearer ${bearerToken}` },
+      signal: AbortSignal.timeout(15000),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      return { tweets: [], error: `HTTP ${res.status}: ${body.substring(0, 200)}` };
+    }
+
+    const json = await res.json();
+    return { tweets: json.data ?? [] };
+  } catch (e) {
+    return { tweets: [], error: String(e) };
+  }
+}
+
+// ポケカちゃん (@pokecachan) のXポストを取得
 async function scrapePokecachan(): Promise<ScrapedProduct[]> {
   const products: ScrapedProduct[] = [];
   const log: string[] = [];
 
-  // 複数のRSSHub/Nitterインスタンスを試行
-  const rssUrls = [
-    "https://rsshub.app/twitter/user/pokecachan",
-    "https://rss.app/feeds/v1.1/twitter/pokecachan.xml",
-  ];
-
-  let xml = "";
-  let fetched = false;
-
-  for (const rssUrl of rssUrls) {
-    try {
-      const res = await fetch(rssUrl, {
-        headers: { "User-Agent": "SedoriCalendar/1.0" },
-        signal: AbortSignal.timeout(10000),
-      });
-      if (res.ok) {
-        xml = await res.text();
-        fetched = true;
-        log.push(`pokecachan: fetched via ${new URL(rssUrl).hostname}`);
-        break;
-      }
-    } catch {
-      continue;
-    }
-  }
-
-  if (!fetched || !xml) {
-    // RSSが使えない場合、Nitterインスタンスを試行
-    const nitterUrls = [
-      "https://nitter.net/pokecachan/rss",
-      "https://nitter.privacydev.net/pokecachan/rss",
-    ];
-    for (const nUrl of nitterUrls) {
-      try {
-        const res = await fetch(nUrl, {
-          headers: { "User-Agent": "SedoriCalendar/1.0" },
-          signal: AbortSignal.timeout(10000),
-        });
-        if (res.ok) {
-          xml = await res.text();
-          fetched = true;
-          log.push(`pokecachan: fetched via nitter`);
-          break;
-        }
-      } catch {
-        continue;
-      }
-    }
-  }
-
-  if (!fetched || !xml) {
-    log.push("pokecachan: all RSS sources failed");
-    console.error("[scrape] pokecachan: could not fetch RSS from any source");
+  const { tweets, error } = await fetchTweetsFromX("pokecachan");
+  if (error) {
+    log.push(`pokecachan: ${error}`);
+    console.error("[scrape] pokecachan:", error);
     console.log("[scrape] pokecachan:", log.join(", "));
     return products;
   }
 
-  try {
-    const $ = cheerio.load(xml, { xml: true });
-    const items = $("item");
-    log.push(`${items.length} items found`);
+  log.push(`pokecachan: ${tweets.length} tweets fetched`);
 
-    items.each((_, el) => {
-      const title = $(el).find("title").text();
-      const description = $(el).find("description").text();
-      const content = $(el).find("content\\:encoded").text();
-      const fullText = title + " " + description + " " + content;
+  for (const tweet of tweets) {
+    const text = tweet.text;
 
-      // 日付を抽出
-      const eventDate = extractDateFromText(fullText);
-      if (!eventDate) return;
+    const eventDate = extractDateFromText(text);
+    if (!eventDate) continue;
 
-      // ポケカ関連かチェック
-      const isRelevant = /ポケカ|ポケモン|トレカ|発売|抽選|再販|プレ値|相場/.test(fullText);
-      if (!isRelevant) return;
+    const isRelevant = /ポケカ|ポケモン|トレカ|発売|抽選|再販|プレ値|相場/.test(text);
+    if (!isRelevant) continue;
 
-      // 商品名を抽出
-      let name = extractProductName(title);
-      if (!name || name.length < 3) {
-        // タイトルが短い場合、descriptionから抽出を試みる
-        const descText = cheerio.load(description).text();
-        name = descText.substring(0, 100).split(/[。\n]/)[0].trim();
-      }
-      if (!name || name.length < 3) return;
+    let name = text.substring(0, 100).split(/[。\n]/)[0].trim();
+    name = extractProductName(name);
+    if (!name || name.length < 3) continue;
 
-      const bodyHtml = description + " " + content;
-      const price = extractPrice(`<div>${bodyHtml}</div>`);
-      const marketPrice = extractMarketPrice(`<div>${bodyHtml}</div>`);
-      const actualPrice = price ?? 0;
-      const premiumRate =
-        marketPrice && actualPrice > 0
-          ? Math.round((marketPrice / actualPrice) * 100) / 100
-          : undefined;
+    const price = extractPrice(`<div>${text}</div>`);
+    const marketPrice = extractMarketPrice(`<div>${text}</div>`);
+    const actualPrice = price ?? 0;
+    const premiumRate =
+      marketPrice && actualPrice > 0
+        ? Math.round((marketPrice / actualPrice) * 100) / 100
+        : undefined;
 
-      // 公式URLを抽出
-      const officialUrl = extractOfficialUrl(`<div>${bodyHtml}</div>`);
-
-      products.push({
-        name,
-        category: "card", // ポケカちゃんは基本トレカ
-        price: actualPrice,
-        market_price: marketPrice ?? undefined,
-        premium_rate: premiumRate,
-        event_date: eventDate,
-        event_type: guessEventType(fullText),
-        source: "ポケカちゃん",
-        official_url: officialUrl ?? undefined,
-      });
+    products.push({
+      name,
+      category: "card",
+      price: actualPrice,
+      market_price: marketPrice ?? undefined,
+      premium_rate: premiumRate,
+      event_date: eventDate,
+      event_type: guessEventType(text),
+      source: "ポケカちゃん",
     });
-  } catch (e) {
-    console.error("[scrape] pokecachan parse error:", e);
   }
 
   console.log("[scrape] pokecachan:", log.join(", "));
+  return products;
+}
+
+// 転売博士 (@tenbai_hakase) のXポストを取得
+async function scrapeTenbaiHakase(): Promise<ScrapedProduct[]> {
+  const products: ScrapedProduct[] = [];
+  const log: string[] = [];
+
+  const { tweets, error } = await fetchTweetsFromX("tenbai_hakase");
+  if (error) {
+    log.push(`tenbai_hakase: ${error}`);
+    console.error("[scrape] tenbai_hakase:", error);
+    console.log("[scrape] tenbai_hakase:", log.join(", "));
+    return products;
+  }
+
+  log.push(`tenbai_hakase: ${tweets.length} tweets fetched`);
+
+  for (const tweet of tweets) {
+    const text = tweet.text;
+
+    const eventDate = extractDateFromText(text);
+    if (!eventDate) continue;
+
+    const isRelevant = /発売|抽選|再販|プレ値|相場|転売|せどり|限定|値上|高騰/.test(text);
+    if (!isRelevant) continue;
+
+    let name = text.substring(0, 100).split(/[。\n]/)[0].trim();
+    name = extractProductName(name);
+    if (!name || name.length < 3) continue;
+
+    const price = extractPrice(`<div>${text}</div>`);
+    const marketPrice = extractMarketPrice(`<div>${text}</div>`);
+    const actualPrice = price ?? 0;
+    const premiumRate =
+      marketPrice && actualPrice > 0
+        ? Math.round((marketPrice / actualPrice) * 100) / 100
+        : undefined;
+
+    products.push({
+      name,
+      category: guessCategory(text, []),
+      price: actualPrice,
+      market_price: marketPrice ?? undefined,
+      premium_rate: premiumRate,
+      event_date: eventDate,
+      event_type: guessEventType(text),
+      source: "転売博士X",
+    });
+  }
+
+  console.log("[scrape] tenbai_hakase:", log.join(", "));
   return products;
 }
 
@@ -608,13 +622,14 @@ export async function GET(request: NextRequest) {
 
   const results: ScrapedProduct[] = [];
 
-  const [tenbaiLabo, tenbaiQuest, pokecachan] = await Promise.all([
+  const [tenbaiLabo, tenbaiQuest, pokecachan, tenbaiHakase] = await Promise.all([
     scrapeTenbaiLaboRSS(),
     scrapeTenbaiQuest(),
     scrapePokecachan(),
+    scrapeTenbaiHakase(),
   ]);
 
-  results.push(...tenbaiLabo, ...tenbaiQuest, ...pokecachan);
+  results.push(...tenbaiLabo, ...tenbaiQuest, ...pokecachan, ...tenbaiHakase);
 
   // DBに挿入（重複チェック: 同名+同日のものはスキップ）
   let inserted = 0;
@@ -666,6 +681,7 @@ export async function GET(request: NextRequest) {
       tenbaiLabo: tenbaiLabo.length,
       tenbaiQuest: tenbaiQuest.length,
       pokecachan: pokecachan.length,
+      tenbaiHakase: tenbaiHakase.length,
     },
     snkrdunkUpdated,
     timestamp: new Date().toISOString(),
