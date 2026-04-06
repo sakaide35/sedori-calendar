@@ -212,6 +212,11 @@ function extractEventDates(text: string): { startDate: string | null; endDate: s
     startDate = extractDateFromText(text);
   }
 
+  // 開始日 > 締切日の場合は入れ替え
+  if (startDate && endDate && startDate > endDate) {
+    [startDate, endDate] = [endDate, startDate];
+  }
+
   return { startDate, endDate };
 }
 
@@ -790,6 +795,14 @@ export async function GET(request: NextRequest) {
         console.error("[scrape] insert error:", error.message, "product:", product.name);
       }
     } else {
+      // 既存レコードでも推定転売価格・締切日が新たに取れた場合は更新
+      const updates: Record<string, unknown> = {};
+      if (product.estimated_resale_price) updates.estimated_resale_price = product.estimated_resale_price;
+      if (product.event_end_date) updates.event_end_date = product.event_end_date;
+      if (Object.keys(updates).length > 0) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (db as any).from("products").update(updates).eq("id", existing.id);
+      }
       skipped++;
     }
   }
