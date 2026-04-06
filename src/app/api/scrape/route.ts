@@ -21,6 +21,7 @@ interface ScrapedProduct {
   price: number;
   market_price?: number;
   premium_rate?: number;
+  estimated_resale_price?: number;
   event_date: string;
   event_end_date?: string;
   event_type: "release" | "lottery" | "restock";
@@ -117,6 +118,101 @@ function extractMarketPrice(html: string): number | null {
   const m3 = text.match(/(?:メルカリ|ヤフオク|フリマ)(?:で|では|等で)(?:約)?([0-9,]+)\s*万\s*円/);
   if (m3) return parseInt(m3[1].replace(/,/g, ""), 10) * 10000;
   return null;
+}
+
+// ツイートから推定転売価格を抽出（「→22,000円前後」「→10万前後」等）
+function extractEstimatedResalePrice(text: string): number | null {
+  // 「→22,000円前後」「→22,000円」
+  const m1 = text.match(/→\s*(?:約)?([0-9,]+)\s*円/);
+  if (m1) return parseInt(m1[1].replace(/,/g, ""), 10);
+  // 「→10万円前後」「→100万前後」
+  const m2 = text.match(/→\s*(?:約)?([0-9,]+)\s*万\s*円/);
+  if (m2) return parseInt(m2[1].replace(/,/g, ""), 10) * 10000;
+  return null;
+}
+
+// ツイートから開始日と締切日を抽出
+function extractEventDates(text: string): { startDate: string | null; endDate: string | null } {
+  let startDate: string | null = null;
+  let endDate: string | null = null;
+
+  // 「〆切」「締切」に紐づく日付
+  const deadlinePatterns = [
+    /(?:〆切|締切|締め切り|まで).*?(\d{1,2})月(\d{1,2})日/,
+    /(\d{1,2})月(\d{1,2})日.*?(?:〆切|締切|締め切り|まで)/,
+    /(?:〆切|締切|締め切り|まで).*?(\d{1,2})\/(\d{1,2})/,
+    /(\d{1,2})\/(\d{1,2}).*?(?:〆切|締切|締め切り|まで)/,
+    /〜\s*(\d{1,2})\/(\d{1,2})/,
+    /〜\s*(\d{1,2})月(\d{1,2})日/,
+  ];
+  for (const pat of deadlinePatterns) {
+    const m = text.match(pat);
+    if (m) {
+      const month = parseInt(m[1], 10);
+      const day = parseInt(m[2], 10);
+      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        const year = new Date().getFullYear();
+        endDate = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+        break;
+      }
+    }
+  }
+
+  // 「開始」「発売」に紐づく日付
+  const startPatterns = [
+    /(?:開始|発売|スタート).*?(\d{1,2})月(\d{1,2})日/,
+    /(\d{1,2})月(\d{1,2})日.*?(?:開始|発売|スタート)/,
+    /(?:本日|今日)(\d{1,2})月(\d{1,2})日/,
+    /(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2}).*?(?:発売|開始)/,
+    /(?:発売|開始).*?(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/,
+  ];
+  for (const pat of startPatterns) {
+    const m = text.match(pat);
+    if (m) {
+      if (m.length === 4) {
+        // YYYY/MM/DD pattern
+        startDate = `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`;
+      } else {
+        const month = parseInt(m[1], 10);
+        const day = parseInt(m[2], 10);
+        if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+          const year = new Date().getFullYear();
+          startDate = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+        }
+      }
+      break;
+    }
+  }
+
+  // 「来月5月22日に発売予定」のようなパターン
+  const futureDateMatch = text.match(/(\d{1,2})月(\d{1,2})日.*?(?:に|から)?(?:発売|開始|予定)/);
+  if (!startDate && futureDateMatch) {
+    const month = parseInt(futureDateMatch[1], 10);
+    const day = parseInt(futureDateMatch[2], 10);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      const year = new Date().getFullYear();
+      startDate = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    }
+  }
+
+  // 開始日がなく締切日だけある場合 → extractDateFromTextで最初の日付を開始日に
+  if (!startDate && endDate) {
+    const fallback = extractDateFromText(text);
+    if (fallback && fallback !== endDate) {
+      startDate = fallback;
+    } else {
+      // 締切日しかない場合、締切日を開始日にはしない（endDateのみ返す）
+      startDate = null;
+    }
+  }
+
+  // 開始日だけある場合はそのまま
+  // 両方ない場合は従来のextractDateFromTextにフォールバック
+  if (!startDate && !endDate) {
+    startDate = extractDateFromText(text);
+  }
+
+  return { startDate, endDate };
 }
 
 // 本文から公式URL・抽選URLを抽出
@@ -492,11 +588,12 @@ async function scrapePokecachan(): Promise<ScrapedProduct[]> {
   for (const tweet of tweets) {
     const text = tweet.text;
 
-    const eventDate = extractDateFromText(text);
-    if (!eventDate) continue;
-
     const isRelevant = /ポケカ|ポケモン|トレカ|発売|抽選|再販|プレ値|相場/.test(text);
     if (!isRelevant) continue;
+
+    const { startDate, endDate } = extractEventDates(text);
+    const eventDate = startDate || endDate;
+    if (!eventDate) continue;
 
     const name = extractProductNameFromTweet(text);
     if (!name) continue;
@@ -515,7 +612,8 @@ async function scrapePokecachan(): Promise<ScrapedProduct[]> {
       price: actualPrice,
       market_price: marketPrice ?? undefined,
       premium_rate: premiumRate,
-      event_date: eventDate,
+      event_date: startDate || eventDate,
+      event_end_date: startDate && endDate && startDate !== endDate ? endDate : undefined,
       event_type: guessEventType(text),
       source: "ポケカちゃん",
     });
@@ -543,11 +641,12 @@ async function scrapeTenbaiHakase(): Promise<ScrapedProduct[]> {
   for (const tweet of tweets) {
     const text = tweet.text;
 
-    const eventDate = extractDateFromText(text);
-    if (!eventDate) continue;
-
     const isRelevant = /発売|抽選|再販|プレ値|相場|転売|せどり|限定|値上|高騰/.test(text);
     if (!isRelevant) continue;
+
+    const { startDate, endDate } = extractEventDates(text);
+    const eventDate = startDate || endDate;
+    if (!eventDate) continue;
 
     const name = extractProductNameFromTweet(text);
     if (!name) continue;
@@ -560,13 +659,17 @@ async function scrapeTenbaiHakase(): Promise<ScrapedProduct[]> {
         ? Math.round((marketPrice / actualPrice) * 100) / 100
         : undefined;
 
+    const estimatedResalePrice = extractEstimatedResalePrice(text);
+
     products.push({
       name,
       category: guessCategory(text, []),
       price: actualPrice,
       market_price: marketPrice ?? undefined,
       premium_rate: premiumRate,
-      event_date: eventDate,
+      estimated_resale_price: estimatedResalePrice ?? undefined,
+      event_date: startDate || eventDate,
+      event_end_date: startDate && endDate && startDate !== endDate ? endDate : undefined,
       event_type: guessEventType(text),
       source: "転売博士X",
     });
